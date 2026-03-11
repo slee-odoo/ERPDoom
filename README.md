@@ -29,7 +29,7 @@ An Odoo 19 addon that embeds the classic **id Software DOOM** (shareware) direct
 1. Clone or copy the `doom_game` module into your Odoo addons path:
 
    ```bash
-   git clone https://github.com/your-username/ERPDoom.git /path/to/odoo/addons/doom_game
+   git clone https://github.com/slee-odoo/ERPDoom.git /path/to/odoo/addons/doom_game
    ```
 
 2. Restart your Odoo server and update the app list:
