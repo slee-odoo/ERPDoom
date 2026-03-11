@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+
+        <!-- Client Action — rendered by the JS component below -->
+        <record id="doom_client_action" model="ir.actions.client">
+            <field name="name">DOOM</field>
+            <field name="tag">doom_game_action</field>
+            <!-- Full-screen: hide the breadcrumb bar for maximum immersion -->
+            <field name="target">fullscreen</field>
+        </record>
+
+        <!-- Top-level menu item -->
+        <menuitem
+            id="doom_main_menu"
+            name="DOOM"
+            action="doom_client_action"
+            sequence="999"
+            web_icon="doom_game,static/description/icon.png"
+        />
+
+    </data>
+</odoo>

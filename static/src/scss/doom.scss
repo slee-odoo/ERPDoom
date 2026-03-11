@@ -1,0 +1,19 @@
+// DOOM client action wrapper
+// The action is rendered as `target: fullscreen`, so it already fills the
+// content area. We just make sure the iframe fills every pixel.
+
+.o_doom_wrapper {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    z-index: 1;
+
+    iframe {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border: none;
+    }
+}
