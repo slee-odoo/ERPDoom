@@ -138,12 +138,18 @@ DOOM_HTML = r"""<!DOCTYPE html>
         console.error('DOOM init error:', msg);
     }
 
-    // Catch unhandled JS errors (WASM traps surface here too)
+    // Catch unhandled JS errors (WASM traps surface here too).
+    // Return true / preventDefault to suppress the browser's default error
+    // handling — in an iframe context (Odoo backend) an unhandled error would
+    // otherwise trigger the parent frame's error UI, which can steal focus from
+    // the canvas and break SDL2 keyboard input.
     window.onerror = function (msg, src, line, col, err) {
         showError(String(err || msg));
+        return true; // suppress default browser handling
     };
     window.onunhandledrejection = function (e) {
         showError(String(e.reason));
+        e.preventDefault();
     };
 
     function hideSplash() {
@@ -201,7 +207,7 @@ DOOM_HTML = r"""<!DOCTYPE html>
         },
 
         print:    function (t) { console.log(t); },
-        printErr: function (t) { console.warn(t); showError(t); },
+        printErr: function (t) { console.warn(t); },
 
         onAbort: function (what) {
             showError('WASM abort: ' + what);
@@ -216,22 +222,34 @@ DOOM_HTML = r"""<!DOCTYPE html>
     // ── Save-file persistence (IndexedDB) ───────────────────────────────────
     // DOOM saves to files like doomsav0.dsg … doomsav5.dsg in MEMFS.
     // We mirror these to IndexedDB so they survive page reloads.
+    //
+    // IMPORTANT: We never use setInterval to poll Module.FS — touching
+    // Emscripten's FS from a timer callback outside the game loop freezes
+    // SDL2 input.  Instead we sync only on beforeunload / visibilitychange
+    // (i.e. when the user navigates away or hides the tab) and restore once
+    // when the splash hides.
     var DB_NAME = 'doom_saves';
     var DB_STORE = 'files';
     var SAVE_PATTERN = /^\/doomsav\d\.dsg$/;
-    var SYNC_INTERVAL = 3000; // ms
 
     function openDB(cb) {
-        var req = indexedDB.open(DB_NAME, 1);
-        req.onupgradeneeded = function () {
-            req.result.createObjectStore(DB_STORE);
-        };
-        req.onsuccess = function () { cb(req.result); };
-        req.onerror = function () { console.warn('DOOM: IndexedDB unavailable, saves will not persist'); };
+        try {
+            var req = indexedDB.open(DB_NAME, 1);
+            req.onupgradeneeded = function () { req.result.createObjectStore(DB_STORE); };
+            req.onsuccess  = function () { cb(req.result); };
+            req.onerror    = function () {
+                console.warn('DOOM: IndexedDB unavailable, saves will not persist');
+                cb(null);
+            };
+        } catch (e) {
+            console.warn('DOOM: IndexedDB not available');
+            cb(null);
+        }
     }
 
-    function restoreSaves(callback) {
+    function restoreSaves() {
         openDB(function (db) {
+            if (!db) return;
             var tx = db.transaction(DB_STORE, 'readonly');
             var store = tx.objectStore(DB_STORE);
             var req = store.getAll();
@@ -247,9 +265,7 @@ DOOM_HTML = r"""<!DOCTYPE html>
                         console.warn('DOOM: failed to restore ' + keys[i], e);
                     }
                 }
-                callback();
             };
-            tx.onerror = function () { callback(); };
         });
     }
 
@@ -260,35 +276,38 @@ DOOM_HTML = r"""<!DOCTYPE html>
         try { files = fs.readdir('/'); } catch (e) { return; }
         var saves = files.filter(function (f) { return SAVE_PATTERN.test('/' + f); });
         if (!saves.length) return;
-
         openDB(function (db) {
+            if (!db) return;
             var tx = db.transaction(DB_STORE, 'readwrite');
             var store = tx.objectStore(DB_STORE);
             saves.forEach(function (name) {
                 try {
                     var data = fs.readFile('/' + name);
                     store.put(data.buffer, '/' + name);
-                } catch (e) {
-                    // file may have been removed between readdir and readFile
-                }
+                } catch (e) { /* file removed between readdir and readFile */ }
             });
         });
     }
 
-    // Hook into Emscripten startup: restore saves once FS is ready, then start sync loop.
-    var _origMonitor = window.Module.monitorRunDependencies;
-    var _savesRestored = false;
-    window.Module.monitorRunDependencies = function (left) {
-        _origMonitor(left);
-        if (left === 0 && !_savesRestored) {
-            _savesRestored = true;
-            restoreSaves(function () {
+    // Restore saves once after the splash hides (runtime is stable).
+    // Use a one-shot MutationObserver on the splash element so we don't
+    // need to modify hideSplash or hook into Emscripten at all.
+    var _splashObserver = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+            if (splash.classList.contains('gone')) {
+                _splashObserver.disconnect();
+                restoreSaves();
+                // Persist saves when the user leaves (no polling).
+                window.addEventListener('beforeunload', syncSaves);
+                document.addEventListener('visibilitychange', function () {
+                    if (document.hidden) syncSaves();
+                });
                 console.log('DOOM: save persistence active');
-            });
-            setInterval(syncSaves, SYNC_INTERVAL);
-            window.addEventListener('beforeunload', syncSaves);
+                return;
+            }
         }
-    };
+    });
+    _splashObserver.observe(splash, { attributes: true, attributeFilter: ['class'] });
 
     // ── Focus / audio context handling ───────────────────────────────────────
     canvas.addEventListener('focusin', function () {
@@ -299,6 +318,17 @@ DOOM_HTML = r"""<!DOCTYPE html>
     });
     document.addEventListener('keydown', function () {
         if (document.activeElement !== canvas) canvas.focus();
+    });
+
+    // When running inside an Odoo iframe, the parent frame can steal focus
+    // (e.g. a notification toast, background RPC finishing, etc.).
+    // Once the iframe window loses focus, SDL2 stops receiving keyboard events.
+    // Reclaim focus automatically — but only when the tab is still visible
+    // (document.hidden guards against fighting the user when they switch tabs).
+    window.addEventListener('blur', function () {
+        if (document.hidden) return;
+        if (!splash.classList.contains('gone')) return;
+        setTimeout(function () { canvas.focus(); }, 50);
     });
 
     // ── Fullscreen on F11 ────────────────────────────────────────────────────
@@ -315,6 +345,8 @@ DOOM_HTML = r"""<!DOCTYPE html>
 
     // Kick off the initial progress display
     setProgress(2, 'Loading DOOM\u2026');
+    // Safety net: force-hide splash after 30 s if callbacks never fire
+    setTimeout(hideSplash, 30000);
 })();
 </script>
 
